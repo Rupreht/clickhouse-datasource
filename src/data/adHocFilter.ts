@@ -1,3 +1,4 @@
+import { AdHocVariableFilter } from '@grafana/data';
 import { getTable } from './ast';
 
 export class AdHocFilter {
@@ -37,7 +38,7 @@ export class AdHocFilter {
         return valid;
       })
       .map((f, i) => {
-        const key = f.key.includes('.') ? f.key.split('.')[1] : f.key;
+        const key = escapeKey(f.key);
         const value = escapeValueBasedOnOperator(f.value, f.operator);
         const condition = i !== adHocFilters.length - 1 ? (f.condition ? f.condition : 'AND') : '';
         const operator = convertOperatorToClickHouseOperator(f.operator);
@@ -58,20 +59,35 @@ function isValid(filter: AdHocVariableFilter): boolean {
   return filter.key !== undefined && filter.operator !== undefined && filter.value !== undefined;
 }
 
-function escapeValueBasedOnOperator(s: string, operator: AdHocVariableFilterOperator): string {
+function escapeKey(s: string): string {
+  if (['ResourceAttributes', 'ScopeAttributes', 'LogAttributes'].includes(s.split('.')[0])) {
+    return s;
+  }
+
+  // Convert arrayElement syntax to bracket notation
+  if (s.startsWith('arrayElement(') && s.endsWith(')')) {
+    const match = s.match(/arrayElement\((.*?),\s*['"](.*?)['"]\)/);
+    if (match) {
+      const [_, array, key] = match;
+      return `${array}[\\'${key}\\']`;
+    }
+  }
+  return s.includes('.') ? s.split('.')[1] : s;
+}
+
+function escapeValueBasedOnOperator(s: string, operator: string): string {
   if (operator === 'IN') {
     // Allow list of values without parentheses
     if (s.length > 2 && s[0] !== '(' && s[s.length - 1] !== ')') {
-      s = `(${s})`
+      s = `(${s})`;
     }
-
     return s.replace(/'/g, "\\'");
   } else {
     return `\\'${s}\\'`;
   }
 }
 
-function convertOperatorToClickHouseOperator(operator: AdHocVariableFilterOperator): string {
+function convertOperatorToClickHouseOperator(operator: string): string {
   if (operator === '=~') {
     return 'ILIKE';
   }
@@ -80,12 +96,3 @@ function convertOperatorToClickHouseOperator(operator: AdHocVariableFilterOperat
   }
   return operator;
 }
-
-type AdHocVariableFilterOperator = '>' | '<' | '=' | '!=' | '=~' | '!~' | 'IN';
-
-export type AdHocVariableFilter = {
-  key: string;
-  operator: AdHocVariableFilterOperator;
-  value: string;
-  condition?: string;
-};

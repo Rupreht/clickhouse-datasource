@@ -13,21 +13,22 @@ const mockMonaco = {
     Shift: 1024,
   },
   KeyCode: {
-    Enter: 3
+    Enter: 3,
   },
   languages: {
     getLanguages: () => [],
     register: jest.fn(),
     setMonarchTokensProvider: jest.fn(),
     registerCompletionItemProvider: jest.fn(),
-  }
+    registerDocumentFormattingEditProvider: jest.fn(),
+  },
 };
 
 // Mock the editor instance with all required methods
 const mockEditor = (value: string) => ({
   getValue: () => value,
   getDomNode: () => ({
-    style: { width: '100', height: '100' }
+    style: { width: '100', height: '100' },
   }),
   getContentHeight: () => 100,
   layout: jest.fn(),
@@ -113,15 +114,11 @@ describe('SQL Editor', () => {
     expect(registeredAction.label).toBe('Run Query');
 
     // Verify keybinding is correct
-    expect(registeredAction.keybindings).toEqual([
-      mockMonaco.KeyMod.CtrlCmd | mockMonaco.KeyCode.Enter,
-    ]);
-    expect(registeredAction.keybindings).not.toEqual([
-      mockMonaco.KeyMod.Shift | mockMonaco.KeyCode.Enter,
-    ]);
+    expect(registeredAction.keybindings).toEqual([mockMonaco.KeyMod.CtrlCmd | mockMonaco.KeyCode.Enter]);
+    expect(registeredAction.keybindings).not.toEqual([mockMonaco.KeyMod.Shift | mockMonaco.KeyCode.Enter]);
 
     // Trigger the action
-    registeredAction.run();
+    registeredAction.run(mockEditorInstance);
 
     // Verify mockOnRunQuery was called once
     expect(mockOnRunQuery).toHaveBeenCalledTimes(1);

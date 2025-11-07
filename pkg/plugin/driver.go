@@ -18,10 +18,11 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	sdkproxy "github.com/grafana/grafana-plugin-sdk-go/backend/proxy"
-	"github.com/grafana/grafana-plugin-sdk-go/build"
+	"github.com/grafana/grafana-plugin-sdk-go/build/buildinfo"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 	"github.com/grafana/grafana-plugin-sdk-go/data/sqlutil"
-	"github.com/grafana/sqlds/v4"
+	"github.com/grafana/grafana-plugin-sdk-go/experimental/errorsource"
+	"github.com/grafana/sqlds/v5"
 	"github.com/pkg/errors"
 	"golang.org/x/net/proxy"
 )
@@ -88,7 +89,7 @@ func getClientInfoProducts(ctx context.Context) (products []struct{ Name, Versio
 		})
 	}
 
-	if info, err := build.GetBuildInfo(); err == nil {
+	if info, err := buildinfo.GetBuildInfo(); err == nil {
 		products = append(products, struct{ Name, Version string }{
 			Name:    "clickhouse-datasource",
 			Version: info.Version,
@@ -169,6 +170,10 @@ func (h *Clickhouse) Connect(ctx context.Context, config backend.DataSourceInsta
 		}
 	}
 
+	if settings.RowLimit != 0 && settings.EnableRowLimit {
+		customSettings["limit"] = settings.RowLimit
+	}
+
 	httpHeaders, err := extractForwardedHeadersFromMessage(message)
 	if err != nil {
 		return nil, err
@@ -247,7 +252,8 @@ func (h *Clickhouse) Connect(ctx context.Context, config backend.DataSourceInsta
 			log.DefaultLogger.Error(err.Error())
 		}
 
-		return nil, err
+		backend.Logger.Error("failed to create ClickHouse client", "error", err)
+		return nil, errorsource.DownstreamError(fmt.Errorf("failed to create ClickHouse client"), false)
 	}
 
 	return db, settings.isValid()
@@ -261,6 +267,51 @@ func (h *Clickhouse) Converters() []sqlutil.Converter {
 // Macros returns list of macro functions convert the macros of raw query
 func (h *Clickhouse) Macros() sqlds.Macros {
 	return macros.Macros
+}
+
+// MutateQueryError marks ClickHouse errors as downstream errors
+func (h *Clickhouse) MutateQueryError(err error) backend.ErrorWithSource {
+	// Check if any error in the error chain (including multi-errors) is a clickhouse.Exception
+	if containsClickHouseException(err) {
+		return backend.NewErrorWithSource(err, backend.ErrorSourceDownstream)
+	}
+	return backend.NewErrorWithSource(err, backend.DefaultErrorSource)
+}
+
+// containsClickHouseException checks if err or any error in its chain is a clickhouse.Exception
+// It also handles errors wrapped in HTTP response bodies
+func containsClickHouseException(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check if the current error is directly a clickhouse.Exception
+	var wrappedException *clickhouse.Exception
+	if errors.As(err, &wrappedException) {
+		return true
+	}
+
+	errStr := err.Error()
+
+	// Look for common ClickHouse error patterns in response bodies
+	if strings.Contains(errStr, "DB::Exception") {
+		return true
+	}
+
+	// Check for multiple wrapped errors (e.g., from errors.Join)
+	type multiError interface {
+		Unwrap() []error
+	}
+
+	if u, ok := err.(multiError); ok {
+		for _, e := range u.Unwrap() {
+			if containsClickHouseException(e) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (h *Clickhouse) Settings(ctx context.Context, config backend.DataSourceInstanceSettings) sqlds.DriverSettings {
@@ -305,6 +356,13 @@ func (h *Clickhouse) MutateQuery(ctx context.Context, req backend.DataQuery) (co
 // except for specific visualizations (traces, tables, and logs).
 func (h *Clickhouse) MutateResponse(ctx context.Context, res data.Frames) (data.Frames, error) {
 	for _, frame := range res {
+		if frame.Meta.PreferredVisualization == data.VisTypeLogs {
+			err := mergeOpenTelemetryLabels(frame)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		if shouldConvertFields(frame.Meta.PreferredVisualization) {
 			if err := convertNullableJSONFields(frame); err != nil {
 				return res, err
@@ -404,4 +462,96 @@ func extractForwardedHeadersFromMessage(message json.RawMessage) (map[string]str
 	}
 
 	return httpHeaders, nil
+}
+
+func mergeOpenTelemetryLabels(frame *data.Frame) error {
+	var attrFields []*data.Field
+	for _, field := range frame.Fields {
+		if field.Name == "labels" {
+			return nil
+		}
+
+		if field.Type() != data.FieldTypeJSON {
+			continue
+		}
+
+		if field.Name == "ResourceAttributes" || field.Name == "ScopeAttributes" || field.Name == "LogAttributes" {
+			attrFields = append(attrFields, field)
+		}
+	}
+
+	if len(attrFields) == 0 {
+		return nil
+	}
+
+	rowLen, err := frame.RowLen()
+	if err != nil {
+		return err
+	}
+
+	allLabelsValues := make([]map[string]any, rowLen)
+
+	for _, field := range attrFields {
+		for j := 0; j < rowLen; j++ {
+			currentVal := allLabelsValues[j]
+			if currentVal == nil {
+				currentVal = make(map[string]any)
+			}
+
+			val := field.At(j).(json.RawMessage)
+			if val != nil {
+				var valMap map[string]any
+				err := json.Unmarshal(val, &valMap)
+				if err != nil {
+					return err
+				}
+
+				assignFlattenedPath(currentVal, field.Name, "", valMap)
+
+				allLabelsValues[j] = currentVal
+			}
+		}
+	}
+
+	allLabelsValuesJSON := make([]json.RawMessage, rowLen)
+	for i, value := range allLabelsValues {
+		valueJSON, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+
+		allLabelsValuesJSON[i] = valueJSON
+	}
+	allLabels := data.NewField("labels", make(data.Labels), allLabelsValuesJSON)
+
+	filteredFields := make([]*data.Field, 0, len(frame.Fields)-len(attrFields))
+	for _, field := range frame.Fields {
+		if field.Name == "ResourceAttributes" || field.Name == "ScopeAttributes" || field.Name == "LogAttributes" {
+			continue
+		}
+
+		filteredFields = append(filteredFields, field)
+	}
+	filteredFields = append(filteredFields, allLabels)
+	frame.Fields = filteredFields
+
+	return nil
+}
+
+// assignFlattenedPath will flatten a nested map into a map with top level keys separated by dots.
+func assignFlattenedPath(flatMap map[string]any, pathPrefix, pathKey string, pathValue any) {
+	fullPath := fmt.Sprintf("%s.%s", pathPrefix, pathKey)
+	if pathKey == "" {
+		fullPath = pathPrefix
+	}
+
+	nestedMap, ok := pathValue.(map[string]any)
+	if !ok {
+		flatMap[fullPath] = pathValue
+		return
+	}
+
+	for k, v := range nestedMap {
+		assignFlattenedPath(flatMap, fullPath, k, v)
+	}
 }

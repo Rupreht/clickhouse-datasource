@@ -1,4 +1,5 @@
-import { AdHocFilter, AdHocVariableFilter } from './adHocFilter';
+import { AdHocVariableFilter } from '@grafana/data';
+import { AdHocFilter } from './adHocFilter';
 
 describe('AdHocManager', () => {
   it('apply ad hoc filter with no inner query and existing WHERE', () => {
@@ -156,10 +157,10 @@ describe('AdHocManager', () => {
     const ahm = new AdHocFilter();
     ahm.setTargetTableFromQuery('SELECT * FROM foo');
     const val = ahm.apply('SELECT stuff FROM foo WHERE col = test', [
-      { key: 'key', operator: 'IN', value: '(\'val1\', \'val2\')' },
+      { key: 'key', operator: 'IN', value: "('val1', 'val2')" },
     ] as AdHocVariableFilter[]);
     expect(val).toEqual(
-        `SELECT stuff FROM foo WHERE col = test settings additional_table_filters={'foo' : ' key IN (\\'val1\\', \\'val2\\') '}`
+      `SELECT stuff FROM foo WHERE col = test settings additional_table_filters={'foo' : ' key IN (\\'val1\\', \\'val2\\') '}`
     );
   });
 
@@ -167,10 +168,10 @@ describe('AdHocManager', () => {
     const ahm = new AdHocFilter();
     ahm.setTargetTableFromQuery('SELECT * FROM foo');
     const val = ahm.apply('SELECT stuff FROM foo WHERE col = test', [
-      { key: 'key', operator: 'IN', value: '\'val1\', \'val2\'' },
+      { key: 'key', operator: 'IN', value: "'val1', 'val2'" },
     ] as AdHocVariableFilter[]);
     expect(val).toEqual(
-        `SELECT stuff FROM foo WHERE col = test settings additional_table_filters={'foo' : ' key IN (\\'val1\\', \\'val2\\') '}`
+      `SELECT stuff FROM foo WHERE col = test settings additional_table_filters={'foo' : ' key IN (\\'val1\\', \\'val2\\') '}`
     );
   });
 
@@ -181,7 +182,7 @@ describe('AdHocManager', () => {
       { key: 'key', operator: 'IN', value: '(1, 2, 3)' },
     ] as AdHocVariableFilter[]);
     expect(val).toEqual(
-        `SELECT stuff FROM foo WHERE col = test settings additional_table_filters={'foo' : ' key IN (1, 2, 3) '}`
+      `SELECT stuff FROM foo WHERE col = test settings additional_table_filters={'foo' : ' key IN (1, 2, 3) '}`
     );
   });
 
@@ -216,8 +217,8 @@ describe('AdHocManager', () => {
   });
 
   it('log a malformed filter', () => {
-    const warn = jest.spyOn(console, "warn");
-    const value = { key: 'foo.key', operator: '=', value: undefined }
+    const warn = jest.spyOn(console, 'warn');
+    const value = { key: 'foo.key', operator: '=', value: undefined };
     const ahm = new AdHocFilter();
     ahm.setTargetTableFromQuery('SELECT * FROM foo');
     ahm.apply('SELECT foo.stuff FROM foo', [
@@ -231,10 +232,24 @@ describe('AdHocManager', () => {
   it('apply ad hoc filter with no set table', () => {
     const ahm = new AdHocFilter();
     const val = ahm.apply('SELECT stuff FROM foo', [
-      { key: 'key', operator: '=', value: 'val' }
+      { key: 'key', operator: '=', value: 'val' },
     ] as AdHocVariableFilter[]);
-    expect(val).toEqual(
-      `SELECT stuff FROM foo settings additional_table_filters={'foo' : ' key = \\'val\\' '}`
-    );
+    expect(val).toEqual(`SELECT stuff FROM foo settings additional_table_filters={'foo' : ' key = \\'val\\' '}`);
+  });
+
+  it('converts arrayElement with single quotes', () => {
+    const ahm = new AdHocFilter();
+    const result = ahm.apply('SELECT * FROM foo', [
+      { key: "arrayElement(ResourceAttributes, 'cloud.region')", operator: '=', value: 'test' },
+    ] as AdHocVariableFilter[]);
+    expect(result).toContain("ResourceAttributes[\\'cloud.region\\']");
+  });
+
+  it('converts arrayElement with single quotes', () => {
+    const ahm = new AdHocFilter();
+    const result = ahm.apply('SELECT * FROM foo', [
+      { key: "ResourceAttributes.cloud.region'", operator: '=', value: 'test' },
+    ] as AdHocVariableFilter[]);
+    expect(result).toContain('ResourceAttributes.cloud.region');
   });
 });

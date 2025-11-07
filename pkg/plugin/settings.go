@@ -44,6 +44,9 @@ type Settings struct {
 	ForwardGrafanaHeaders bool              `json:"forwardGrafanaHeaders,omitempty"`
 	CustomSettings        []CustomSetting   `json:"customSettings"`
 	ProxyOptions          *proxy.Options
+
+	RowLimit       int64 `json:"rowLimit,omitempty"`
+	EnableRowLimit bool  `json:"enableRowLimit,omitempty"`
 }
 
 type CustomSetting struct {
@@ -184,6 +187,17 @@ func LoadSettings(ctx context.Context, config backend.DataSourceInstanceSettings
 		}
 	}
 
+	if jsonData["enableRowLimit"] != nil {
+		if enableRowLimitString, ok := jsonData["enableRowLimit"].(string); ok {
+			settings.EnableRowLimit, err = strconv.ParseBool(enableRowLimitString)
+			if err != nil {
+				backend.Logger.Warn("Failed to parse enableRowLimit value, defaulting to false", "error", err)
+			}
+		} else {
+			settings.EnableRowLimit = jsonData["enableRowLimit"].(bool)
+		}
+	}
+
 	// Set default values
 	if strings.TrimSpace(settings.DialTimeout) == "" {
 		settings.DialTimeout = "10"
@@ -233,6 +247,17 @@ func LoadSettings(ctx context.Context, config backend.DataSourceInstanceSettings
 		}
 
 		settings.ProxyOptions = proxyOpts
+	}
+
+	// This condition can be removed once the minimum supported Grafana version is 11.0.0
+	if settings.EnableRowLimit {
+		cfg := backend.GrafanaConfigFromContext(ctx)
+		sqlCfg, err := cfg.SQL()
+		if err != nil {
+			return settings, err
+		}
+
+		settings.RowLimit = sqlCfg.RowLimit
 	}
 
 	return settings, settings.isValid()

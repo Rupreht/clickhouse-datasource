@@ -13,10 +13,11 @@ import { Observable, of } from 'rxjs';
 import { DataSourceWithBackend } from '@grafana/runtime';
 import { mockDatasource } from '__mocks__/datasource';
 import { CHBuilderQuery, CHQuery, CHSqlQuery, EditorType } from 'types/sql';
-import { ColumnHint, QueryType, BuilderMode, QueryBuilderOptions} from 'types/queryBuilder';
+import { ColumnHint, QueryType, BuilderMode, QueryBuilderOptions } from 'types/queryBuilder';
 import { cloneDeep } from 'lodash';
 import { Datasource } from './CHDatasource';
 import * as logs from './logs';
+import { AdHocFilter } from './adHocFilter';
 
 jest.mock('./logs', () => ({
   getTimeFieldRoundingClause: jest.fn(),
@@ -99,6 +100,53 @@ describe('ClickHouseDatasource', () => {
       expect(spyOnReplace).toHaveBeenCalled();
       expect(spyOnGetVars).toHaveBeenCalled();
       expect(val).toEqual({ rawSql: `1=1`, editorType: EditorType.SQL });
+    });
+
+    it('should apply ad-hoc filters correctly with template variables for table names', async () => {
+      // Setup the query with template variables for table names
+      const query = {
+        rawSql: 'SELECT * FROM ${database}.${table}',
+        editorType: EditorType.SQL,
+      } as CHQuery;
+
+      // Mock the ad-hoc filter
+      const adHocFilter = new AdHocFilter();
+
+      // The resolved table name after template variable substitution
+      const resolvedSql = 'SELECT * FROM test_db.test_table';
+
+      // The expected final SQL with ad-hoc filters applied
+      const sqlWithAdHocFilters = `SELECT * FROM test_db.test_table settings additional_table_filters={'test_db.test_table' : ' column = \\'value\\' '}`;
+
+      // Mock the template variable resolution
+      const spyOnReplace = jest.spyOn(templateSrvMock, 'replace').mockImplementation(() => resolvedSql);
+      const spyOnGetVars = jest.spyOn(templateSrvMock, 'getVariables').mockImplementation(() => []);
+
+      // Setup ad-hoc filters
+      const adHocFilters = [{ key: 'column', operator: '=', value: 'value' }];
+
+      // Mock getAdhocFilters to return our test filters
+      jest.spyOn(templateSrvMock, 'getAdhocFilters').mockImplementation(() => adHocFilters);
+
+      // Mock adHocFilter.apply to return our expected modified SQL
+      const applyFilterSpy = jest.spyOn(adHocFilter, 'apply').mockImplementation(() => sqlWithAdHocFilters);
+
+      // Create datasource instance with our mocked ad-hoc filter
+      const ds = createInstance({});
+      ds.adHocFilter = adHocFilter;
+
+      // Resolve variables
+      const result = ds.applyTemplateVariables(query, {}, adHocFilters);
+
+      // Verify template variables were resolved before ad-hoc filters were applied
+      expect(spyOnReplace).toHaveBeenCalled();
+      expect(spyOnGetVars).toHaveBeenCalled();
+
+      // Verify that apply was called with the resolved SQL
+      expect(applyFilterSpy).toHaveBeenCalledWith(resolvedSql, adHocFilters);
+
+      // Verify that the final query contains the ad-hoc filters
+      expect(result.rawSql).toEqual(sqlWithAdHocFilters);
     });
   });
 
@@ -255,11 +303,14 @@ describe('ClickHouseDatasource', () => {
       const frame = arrayToDataFrame([
         JSON.stringify({ keys: 'a.b.c', values: ['Int64'] }),
         JSON.stringify({ keys: 'a.b.d', values: ['String'] }),
-        JSON.stringify({ keys: 'a.b.e', values: ['Bool'] })
+        JSON.stringify({ keys: 'a.b.e', values: ['Bool'] }),
       ]);
       const spyOnQuery = jest.spyOn(ds, 'query').mockImplementation((_request) => of({ data: [frame] }));
       await ds.fetchPathsForJSONColumns('db_name', 'table_name', 'jsonCol');
-      const expected = { rawSql: 'SELECT arrayJoin(distinctJSONPathsAndTypes(jsonCol)) FROM "db_name"."table_name"' };
+      const expected = {
+        rawSql:
+          'SELECT arrayJoin(distinctJSONPathsAndTypes(jsonCol)) FROM "db_name"."table_name" SETTINGS max_execution_time=10',
+      };
 
       expect(spyOnQuery).toHaveBeenCalledWith(
         expect.objectContaining({ targets: expect.arrayContaining([expect.objectContaining(expected)]) })
@@ -271,11 +322,13 @@ describe('ClickHouseDatasource', () => {
       const frame = arrayToDataFrame([
         JSON.stringify({ keys: 'a.b.c', values: ['Int64'] }),
         JSON.stringify({ keys: 'a.b.d', values: ['String'] }),
-        JSON.stringify({ keys: 'a.b.e', values: ['Bool'] })
+        JSON.stringify({ keys: 'a.b.e', values: ['Bool'] }),
       ]);
       const spyOnQuery = jest.spyOn(ds, 'query').mockImplementation((_request) => of({ data: [frame] }));
       await ds.fetchPathsForJSONColumns('', 'table_name', 'jsonCol');
-      const expected = { rawSql: 'SELECT arrayJoin(distinctJSONPathsAndTypes(jsonCol)) FROM "table_name"' };
+      const expected = {
+        rawSql: 'SELECT arrayJoin(distinctJSONPathsAndTypes(jsonCol)) FROM "table_name" SETTINGS max_execution_time=10',
+      };
 
       expect(spyOnQuery).toHaveBeenCalledWith(
         expect.objectContaining({ targets: expect.arrayContaining([expect.objectContaining(expected)]) })
@@ -287,11 +340,13 @@ describe('ClickHouseDatasource', () => {
       const frame = arrayToDataFrame([
         JSON.stringify({ keys: 'a.b.c', values: ['Int64'] }),
         JSON.stringify({ keys: 'a.b.d', values: ['String'] }),
-        JSON.stringify({ keys: 'a.b.e', values: ['Bool'] })
+        JSON.stringify({ keys: 'a.b.e', values: ['Bool'] }),
       ]);
       const spyOnQuery = jest.spyOn(ds, 'query').mockImplementation((_request) => of({ data: [frame] }));
       await ds.fetchPathsForJSONColumns('', 'table.name', 'jsonCol');
-      const expected = { rawSql: 'SELECT arrayJoin(distinctJSONPathsAndTypes(jsonCol)) FROM "table.name"' };
+      const expected = {
+        rawSql: 'SELECT arrayJoin(distinctJSONPathsAndTypes(jsonCol)) FROM "table.name" SETTINGS max_execution_time=10',
+      };
 
       expect(spyOnQuery).toHaveBeenCalledWith(
         expect.objectContaining({ targets: expect.arrayContaining([expect.objectContaining(expected)]) })
@@ -303,16 +358,16 @@ describe('ClickHouseDatasource', () => {
       const frame = arrayToDataFrame([
         JSON.stringify({ keys: 'a.b.c', values: ['Int64'] }),
         JSON.stringify({ keys: 'a.b.d', values: ['String'] }),
-        JSON.stringify({ keys: 'a.b.e', values: ['Bool'] })
+        JSON.stringify({ keys: 'a.b.e', values: ['Bool'] }),
       ]);
       jest.spyOn(ds, 'query').mockImplementation((_request) => of({ data: [frame] }));
-      
+
       const jsonColumns = await ds.fetchPathsForJSONColumns('db_name', 'table_name', 'jsonCol');
       expect(jsonColumns).toMatchObject([
         { name: 'jsonCol.a.b.c', label: 'jsonCol.a.b.c', type: 'Int64', picklistValues: [] },
         { name: 'jsonCol.a.b.d', label: 'jsonCol.a.b.d', type: 'String', picklistValues: [] },
         { name: 'jsonCol.a.b.e', label: 'jsonCol.a.b.e', type: 'Bool', picklistValues: [] },
-      ])
+      ]);
     });
   });
 
@@ -364,7 +419,7 @@ describe('ClickHouseDatasource', () => {
       const expected = { rawSql: 'SELECT alias, select, "type" FROM "db_name"."table_name"' };
 
       expect(spyOnQuery).toHaveBeenCalledWith(
-          expect.objectContaining({ targets: expect.arrayContaining([expect.objectContaining(expected)]) })
+        expect.objectContaining({ targets: expect.arrayContaining([expect.objectContaining(expected)]) })
       );
     });
   });
@@ -372,12 +427,14 @@ describe('ClickHouseDatasource', () => {
   describe('getAliasTable', () => {
     it('returns the matching table alias', async () => {
       const ds = cloneDeep(mockDatasource);
-      ds.settings.jsonData.aliasTables = [{
-        targetDatabase: 'db_name',
-        targetTable: 'table_name',
-        aliasDatabase: 'alias_db',
-        aliasTable: 'alias_table'
-      }];
+      ds.settings.jsonData.aliasTables = [
+        {
+          targetDatabase: 'db_name',
+          targetTable: 'table_name',
+          aliasDatabase: 'alias_db',
+          aliasTable: 'alias_table',
+        },
+      ];
       const result = ds.getAliasTable('db_name', 'table_name');
       const expected = '"alias_db"."alias_table"';
 
@@ -386,12 +443,14 @@ describe('ClickHouseDatasource', () => {
 
     it('returns null when no alias matches found', async () => {
       const ds = cloneDeep(mockDatasource);
-      ds.settings.jsonData.aliasTables = [{
-        targetDatabase: 'db_name',
-        targetTable: 'table_name',
-        aliasDatabase: 'alias_db',
-        aliasTable: 'alias_table'
-      }];
+      ds.settings.jsonData.aliasTables = [
+        {
+          targetDatabase: 'db_name',
+          targetTable: 'table_name',
+          aliasDatabase: 'alias_db',
+          aliasTable: 'alias_table',
+        },
+      ];
       const result = ds.getAliasTable('other_db', 'other_table');
       expect(result).toBeNull();
     });
@@ -433,7 +492,7 @@ describe('ClickHouseDatasource', () => {
         columns: [
           { name: 'created_at', hint: ColumnHint.Time },
           { name: 'level', hint: ColumnHint.LogLevel },
-        ]
+        ],
       },
     };
     const request: DataQueryRequest<CHQuery> = {
@@ -460,14 +519,14 @@ describe('ClickHouseDatasource', () => {
 
     describe('getSupplementaryLogsVolumeQuery', () => {
       it('should return undefined if any of the conditions are not met', async () => {
-        [QueryType.Table, QueryType.TimeSeries, QueryType.Traces].forEach(queryType => {
+        [QueryType.Table, QueryType.TimeSeries, QueryType.Traces].forEach((queryType) => {
           expect(
             datasource.getSupplementaryLogsVolumeQuery(request, {
               ...query,
               builderOptions: {
                 ...query.builderOptions,
-                queryType
-              }
+                queryType,
+              },
             })
           ).toBeUndefined();
         });
@@ -477,7 +536,7 @@ describe('ClickHouseDatasource', () => {
               ...query,
               builderOptions: {
                 ...query.builderOptions,
-                mode
+                mode,
               },
             })
           ).toBeUndefined();
@@ -486,7 +545,7 @@ describe('ClickHouseDatasource', () => {
           datasource.getSupplementaryLogsVolumeQuery(request, {
             ...query,
             editorType: EditorType.SQL,
-            queryType: undefined
+            queryType: undefined,
           })
         ).toBeUndefined();
         expect(
@@ -512,7 +571,7 @@ describe('ClickHouseDatasource', () => {
             ...query,
             builderOptions: {
               ...query.builderOptions,
-              columns: query.builderOptions.columns?.filter(c => c.hint !== ColumnHint.Time)
+              columns: query.builderOptions.columns?.filter((c) => c.hint !== ColumnHint.Time),
             } as QueryBuilderOptions,
           })
         ).toBeUndefined();
@@ -526,7 +585,7 @@ describe('ClickHouseDatasource', () => {
           ...query,
           builderOptions: {
             ...query.builderOptions,
-            columns: query.builderOptions.columns?.filter(c => c.hint !== ColumnHint.LogLevel)
+            columns: query.builderOptions.columns?.filter((c) => c.hint !== ColumnHint.LogLevel),
           } as QueryBuilderOptions,
         });
         expect(result?.rawSql).toEqual(
